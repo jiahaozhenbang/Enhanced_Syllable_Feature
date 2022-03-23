@@ -576,7 +576,8 @@ class Attention_GlyceBertForMultiTask(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-        prediction_scores, sm_scores,ym_scores,sd_scores = self.cls(sequence_output, attention_mask=attention_mask,)
+        extended_attention_mask: torch.Tensor = self.bert.get_extended_attention_mask(attention_mask, input_ids.size(), input_ids.device)
+        prediction_scores, sm_scores,ym_scores,sd_scores = self.cls(sequence_output, attention_mask=extended_attention_mask,)
 
         masked_lm_loss = None
         loss_fct = self.loss_fct  # -100 index = padding token
@@ -620,3 +621,140 @@ class Attention_GlyceBertForMultiTask(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+
+
+class Attention_and_weightLoss_GlyceBertForMultiTask(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.bert = GlyceBertModel(config)
+        self.cls = Attention_MultiTaskHeads(config)
+        self.loss_fct = CrossEntropyLoss()
+
+        self.init_weights()
+
+    def get_output_embeddings(self):
+        return self.cls.predictions.decoder
+
+    def forward(
+        self,
+        input_ids=None,
+        pinyin_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        pinyin_labels=None, 
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        gamma=1,
+        **kwargs
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss.
+            Indices should be in ``[-100, 0, ..., config.vocab_size]`` (see ``input_ids`` docstring)
+            Tokens with indices set to ``-100`` are ignored (masked), the loss is only computed for the tokens with labels
+            in ``[0, ..., config.vocab_size]``
+        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
+            Used to hide legacy arguments that have been deprecated.
+        """
+        if "masked_lm_labels" in kwargs:
+            warnings.warn(
+                "The `masked_lm_labels` argument is deprecated and will be removed in a future version, use `labels` instead.",
+                FutureWarning,
+            )
+            labels = kwargs.pop("masked_lm_labels")
+        assert "lm_labels" not in kwargs, "Use `BertWithLMHead` for autoregressive language modeling task."
+        assert kwargs == {}, f"Unexpected keyword arguments: {list(kwargs.keys())}."
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        loss_mask = (input_ids != 0)*(input_ids != 101)*(input_ids != 102).long()
+        outputs = self.bert(
+            input_ids,
+            pinyin_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        sequence_output = outputs[0]
+        extended_attention_mask: torch.Tensor = self.bert.get_extended_attention_mask(attention_mask, input_ids.size(), input_ids.device)
+        prediction_scores, sm_scores,ym_scores,sd_scores = self.cls(sequence_output, attention_mask=extended_attention_mask,)
+
+        masked_lm_loss = None
+        phonetic_loss=None
+        loss_fct = self.loss_fct  # -100 index = padding token
+        if labels is not None and pinyin_labels is not None:
+
+            not_chinese_mask = (pinyin_labels[...,0].view(-1) == 0) & (pinyin_labels[...,1].view(-1) == 0) & (pinyin_labels[...,2].view(-1) == 0)
+            active_loss = loss_mask.view(-1) == 1
+
+            def get_weight_of_loss(a, b):
+                prob_tensor = F.softmax(a, dim= -1).detach()
+                weight = torch.ones_like(b) * 2 - prob_tensor[torch.arange(prob_tensor.shape[0]), b]
+                weight[not_chinese_mask] = 1.0
+                return weight
+
+            active_labels = torch.where(
+                active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
+            )
+            char_weight = get_weight_of_loss(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), active_labels)
+
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,0].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            sm_weight = get_weight_of_loss(sm_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sm_size), pinyin_labels[...,0].view(-1))
+            sm_loss = loss_fct(sm_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sm_size), active_labels)
+
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,1].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            ym_weight = get_weight_of_loss(ym_scores.view(-1, self.cls.Phonetic_relationship.pinyin.ym_size), pinyin_labels[...,1].view(-1))
+            ym_loss = loss_fct(ym_scores.view(-1, self.cls.Phonetic_relationship.pinyin.ym_size), active_labels)
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,2].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            sd_weight = get_weight_of_loss(sd_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sd_size), pinyin_labels[...,2].view(-1))
+            sd_loss = loss_fct(sd_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sd_size), active_labels)
+            phonetic_loss=(sm_loss+ym_loss+sd_loss)/3
+
+            def weighted_mean(weight, input):
+                return torch.sum(weight * input) / torch.sum(weight)
+            
+            masked_lm_loss = weighted_mean( (sm_weight + ym_weight + sd_weight) / 3, masked_lm_loss)
+            phonetic_loss = weighted_mean(char_weight, phonetic_loss)
+
+
+        loss=None
+        if masked_lm_loss is not None and phonetic_loss is not None:
+            loss=masked_lm_loss 
+            loss+= phonetic_loss *gamma
+        
+        if not return_dict:
+            output = (prediction_scores, sm_scores,ym_scores,sd_scores,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return MaskedLMOutput(
+            loss=loss,
+            logits=prediction_scores,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
