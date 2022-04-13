@@ -27,13 +27,16 @@ from torch.utils.data.dataloader import DataLoader
 from transformers import MODEL_MAPPING, AdamW, BertConfig, get_linear_schedule_with_warmup
 
 from datasets.bert_csc_dataset import CSCDataset,TestCSCDataset
-from models.modeling_multitask import GlyceBertForMultiTask,Attention_GlyceBertForMultiTask,Attention_and_weightLoss_GlyceBertForMultiTask
+from models.prefixTuning import PrefixGlyceBertForMultiTask
+from models.prefixTuning import PrefixTuning_embedding
 from utils.random_seed import set_random_seed
 from datasets.collate_functions import collate_to_max_length_with_id,collate_to_max_length_for_train
 
-MODEL_MAP = {'ORINGIN': GlyceBertForMultiTask, 'ATTENTION': Attention_GlyceBertForMultiTask, 'ATTENTION_AND_WEIGHTED': Attention_and_weightLoss_GlyceBertForMultiTask}
+from itertools import chain
+
 
 set_random_seed(2333)
+
 
 def decode_sentence_and_get_pinyinids(ids):
     dataset = TestCSCDataset(
@@ -46,43 +49,77 @@ def decode_sentence_and_get_pinyinids(ids):
     pinyin_ids = torch.LongTensor(pinyin_tokens).unsqueeze(0)
     return sent,pinyin_ids
 
-class CSCTask(pl.LightningModule):
-    def __init__(self, args: argparse.Namespace):
+class PrefixCSC(pl.LightningModule):
+    def __init__(self, args: argparse.Namespace, **kwargs):
         """Initialize a models, tokenizer and config."""
         super().__init__()
+        if not isinstance(args, argparse.Namespace):
+            args = argparse.Namespace(**args)
         self.args = args
-        if isinstance(args, argparse.Namespace):
-            self.save_hyperparameters(args)
+        if 'batch_size' in kwargs:
+            self.args.batch_size = kwargs['batch_size']
+        self.save_hyperparameters(args)
         self.bert_dir = args.bert_path
         self.bert_config = BertConfig.from_pretrained(
             self.bert_dir, output_hidden_states=False
         )
-        self.model = MODEL_MAP[self.args.model_architecture].from_pretrained(self.bert_dir)
+        self.autoencoder = PrefixGlyceBertForMultiTask.from_pretrained(self.bert_dir)
         if args.ckpt_path is not None:
             print("loading from ", args.ckpt_path)
             ckpt = torch.load(args.ckpt_path,)["state_dict"]
             new_ckpt = {}
             for key in ckpt.keys():
                 new_ckpt[key[6:]] = ckpt[key]
-            self.model.load_state_dict(new_ckpt,strict=False)
-            print(self.model.device, torch.cuda.is_available())
+            self.autoencoder.load_state_dict(new_ckpt,strict=True)
+            print(self.autoencoder.device, torch.cuda.is_available())
+        else:
+            self.autoencoder = PrefixGlyceBertForMultiTask.from_pretrained(self.bert_dir)
         self.vocab_size = self.bert_config.vocab_size
+        cache_dir =  None
 
-        self.loss_fct = CrossEntropyLoss()
-        gpus_string = (
-            str(self.args.gpus) if not str(self.args.gpus).endswith(",") else str(self.args.gpus)[:-1]
-        )
-        self.num_gpus = len(gpus_string.split(","))
+        config_prefix = BertConfig.from_pretrained(self.bert_dir, )
+        self.model_type = config_prefix.model_type
+
+        if self.args.optim_prefix == 'yes':
+            optim_prefix_bool = True
+        elif self.args.optim_prefix == 'no':
+            optim_prefix_bool = False
+        else:
+            assert False, "model_args.optim_prefix should be either yes or no"
+
+        print(self.model_type)
+        config_prefix.optim_prefix = optim_prefix_bool
+        config_prefix.preseqlen = self.args.preseqlen
+        config_prefix.format_mode = self.args.format_mode
+        config_prefix.prefix_dropout = 0
+        config_prefix.vocab_size = self.vocab_size
+        # some extra stuff.
+
+        print(config_prefix)
+
+        if "prefixModel_name_or_path" in self.args and  self.args.prefixModel_name_or_path is not None:
+            print('loading from {}'.format(args.prefixModel_name_or_path))
+            self.model = PrefixTuning_embedding.from_pretrained(self.args.prefixModel_name_or_path,
+                        cache_dir=cache_dir,
+                        config=config_prefix,)
+        else:
+            self.model = PrefixTuning_embedding(config_prefix)
+        
+        # for par in self.autoencoder.parameters():
+        #     par.requires_grad = False
+
+
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
         model = self.model
+        model2 = self.autoencoder
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
                 "params": [
                     p
-                    for n, p in model.named_parameters()
+                    for n, p in chain(model.named_parameters(), model2.named_parameters())
                     if not any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": self.args.weight_decay,
@@ -90,7 +127,7 @@ class CSCTask(pl.LightningModule):
             {
                 "params": [
                     p
-                    for n, p in model.named_parameters()
+                    for n, p in chain(model.named_parameters(), model2.named_parameters())
                     if any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": 0.0,
@@ -118,6 +155,7 @@ class CSCTask(pl.LightningModule):
         """"""
         attention_mask = (input_ids != 0).long()
         return self.model(
+            self.autoencoder,
             input_ids,
             pinyin_ids,
             attention_mask=attention_mask,
@@ -128,13 +166,17 @@ class CSCTask(pl.LightningModule):
 
     def compute_loss(self, batch):
         input_ids, pinyin_ids, labels, pinyin_labels = batch
-        loss_mask = (input_ids != 0) * (input_ids != 101) * (input_ids != 102).long()
         batch_size, length = input_ids.shape
         pinyin_ids = pinyin_ids.view(batch_size, length, 8)
         outputs = self.forward(
             input_ids, pinyin_ids, labels=labels, pinyin_labels=pinyin_labels
         )
-        loss = outputs.loss
+        loss = None
+        for cache_key in ['char', 'pronunciation']:
+            if loss is None:
+                loss = outputs[cache_key].loss
+            else:
+                loss += outputs[cache_key].loss
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -156,7 +198,7 @@ class CSCTask(pl.LightningModule):
         logits = self.forward(
             input_ids,
             pinyin_ids,
-        ).logits
+        )['char'].logits
         predict_scores = F.softmax(logits, dim=-1)
         predict_labels = torch.argmax(predict_scores, dim=-1) * mask
         return {
@@ -186,6 +228,7 @@ class CSCTask(pl.LightningModule):
         )
         self.log("df", results["sent-detect-f1"])
         self.log("cf", results["sent-correct-f1"])
+        self.log('prefixlen', self.args.preseqlen)
         return {"df": results["sent-detect-f1"], "cf": results["sent-correct-f1"]}
 
     def train_dataloader(self) -> DataLoader:
@@ -230,7 +273,24 @@ class CSCTask(pl.LightningModule):
         return dataloader
 
     def val_dataloader(self):
-        return self.get_dataloader("dev15")
+        dataset = TestCSCDataset(
+            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan15.pkl',
+            chinese_bert_path=self.args.bert_path,
+            max_length=self.args.max_length,
+        )
+        print('dev dataset', len(dataset))
+        self.tokenizer = dataset.tokenizer
+        from datasets.collate_functions import collate_to_max_length_with_id
+
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=self.args.workers,
+            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
+            drop_last=False,
+        )
+        return dataloader
 
     def dev13_dataloader(self):
         return self.get_dataloader("dev13")
@@ -295,12 +355,13 @@ class CSCTask(pl.LightningModule):
         )
         return dataloader
 
+
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         input_ids, pinyin_ids, labels, pinyin_labels, ids, srcs, tokens_size = batch
         mask = (input_ids != 0) * (input_ids != 101) * (input_ids != 102).long()
         batch_size, length = input_ids.shape
         pinyin_ids = pinyin_ids.view(batch_size, length, 8)
-        logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids).logits
+        logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids)['char'].logits
         predict_scores = F.softmax(logits, dim=-1)
         predict_labels = torch.argmax(predict_scores, dim=-1) * mask
         
@@ -310,7 +371,7 @@ class CSCTask(pl.LightningModule):
                 input_ids[(predict_labels == self.tokenizer.token_to_id('地')) | (predict_labels == self.tokenizer.token_to_id('得'))]
         
         pre_predict_labels = predict_labels
-        for _ in range(0):
+        for _ in range(1):
             record_index = []
             for i,(a,b) in enumerate(zip(list(input_ids[0,1:-1]),list(predict_labels[0,1:-1]))):
                 if a!=b:
@@ -322,7 +383,7 @@ class CSCTask(pl.LightningModule):
                 pinyin_ids = new_pinyin_ids
             pinyin_ids = pinyin_ids.to(input_ids.device)
             # print(input_ids.device, pinyin_ids.device)
-            logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids).logits
+            logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids)['char'].logits
             predict_scores = F.softmax(logits, dim=-1)
             predict_labels = torch.argmax(predict_scores, dim=-1) * mask
 
@@ -352,12 +413,14 @@ class CSCTask(pl.LightningModule):
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
+    parser.add_argument("--optim_prefix", default='yes', type=str, help="bert config file")
+    parser.add_argument("--preseqlen", default=5, type=int, help="bert config file")
+    parser.add_argument('--format_mode', type=str, default='cat', help='')
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
     parser.add_argument(
         "--label_file",
-        default="/home/ljh/CSC/Enhanced_Syllable_Feature/data/finetune_data/dev15.lbl",
+        default="/home/ljh/github/ReaLiSe-master/data/test.sighan15.lbl.tsv",
         type=str,
         help="label file",
     )
@@ -407,11 +470,11 @@ def main():
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
-    model = CSCTask(args)
+    model = PrefixCSC(args)
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(args.save_path, "checkpoint"),
-        filename="{epoch}-{df:.4f}-{cf:.4f}",
+        filename="{prefixlen}{epoch}-{df:.4f}-{cf:.4f}",
         save_top_k=args.save_topk,
         monitor="cf",
         mode="max",

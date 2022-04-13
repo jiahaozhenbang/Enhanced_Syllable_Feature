@@ -49,6 +49,32 @@ class CSCDataset(ChineseBertDataset):
         pinyin_label=torch.LongTensor(pinyin_label)
         return input_ids, pinyin_ids, label,pinyin_label,example_id,src,tokens_size
 
+class Dynaimic_CSCDataset(ChineseBertDataset):
+
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+        file = self.data_path
+        print('processing ',file)
+        with open(file, 'r' ,encoding='utf8') as f:
+            self.data = list(f.readlines())
+        self.data = [line for line in self.data if len(json.loads(line)['input_ids']) < 192]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        example = json.loads(self.data[idx])
+        input_ids, pinyin_ids, label,pinyin_label = example['input_ids'], example['pinyin_ids'], example['label'], example['pinyin_label']
+        tgt_pinyin_ids = example['tgt_pinyin_ids']
+        # convert list to tensor
+        input_ids = torch.LongTensor(input_ids)
+        pinyin_ids = torch.LongTensor(pinyin_ids).view(-1)
+
+        label = torch.LongTensor(label)
+        pinyin_label=torch.LongTensor(pinyin_label)
+        tgt_pinyin_ids = torch.LongTensor(tgt_pinyin_ids).view(-1)
+        return input_ids, pinyin_ids, label, tgt_pinyin_ids, pinyin_label
+
 class TestCSCDataset(ChineseBertDataset):
 
     def __init__(self,**kwargs):

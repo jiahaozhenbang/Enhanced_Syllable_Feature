@@ -15,7 +15,7 @@ export PYTHONPATH="$PYTHONPATH:$REPO_PATH"
 for prefix in  'AA' 'AB' 'AC' 'AD' 'AE' 'AF' 'AG' 'AH' 'AI' 'AJ' 'AK' 'AL' 'AM'
 # for prefix in 'AH' 'AI' 'AJ' 'AK' 'AL' 'AM'
 do
-CUDA_VISIBLE_DEVICES=2   python -u /home/ljh/CSC/Enhanced_Syllable_Feature/further_pretrain/attention_and_weightLoss_train.py \
+CUDA_VISIBLE_DEVICES=6   python -u /home/ljh/CSC/Enhanced_Syllable_Feature/further_pretrain/attention_and_weightLoss_train.py \
   --bert_path $BERT_PATH \
   --data_dir $DATA_DIR \
   --save_path $OUTPUT_DIR \

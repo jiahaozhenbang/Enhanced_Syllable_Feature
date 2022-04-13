@@ -26,12 +26,17 @@ from torch.nn.modules import CrossEntropyLoss
 from torch.utils.data.dataloader import DataLoader
 from transformers import MODEL_MAPPING, AdamW, BertConfig, get_linear_schedule_with_warmup
 
-from datasets.bert_csc_dataset import CSCDataset,TestCSCDataset
-from models.modeling_multitask import GlyceBertForMultiTask,Attention_GlyceBertForMultiTask,Attention_and_weightLoss_GlyceBertForMultiTask
+from datasets.bert_csc_dataset import CSCDataset,TestCSCDataset, Dynaimic_CSCDataset
+from models.modeling_multitask import GlyceBertForMultiTask,Attention_GlyceBertForMultiTask,Attention_and_weightLoss_GlyceBertForMultiTask, \
+                                            Dynamic_GlyceBertForMultiTask
 from utils.random_seed import set_random_seed
-from datasets.collate_functions import collate_to_max_length_with_id,collate_to_max_length_for_train
+from datasets.collate_functions import collate_to_max_length_with_id,collate_to_max_length_for_train_dynamic_pron_loss
 
-MODEL_MAP = {'ORINGIN': GlyceBertForMultiTask, 'ATTENTION': Attention_GlyceBertForMultiTask, 'ATTENTION_AND_WEIGHTED': Attention_and_weightLoss_GlyceBertForMultiTask}
+MODEL_MAP = {'ORINGIN': GlyceBertForMultiTask, 
+        'ATTENTION': Attention_GlyceBertForMultiTask, 
+        'ATTENTION_AND_WEIGHTED': Attention_and_weightLoss_GlyceBertForMultiTask,
+        'Dynamic_PRON_LOSS': Dynamic_GlyceBertForMultiTask
+        }
 
 set_random_seed(2333)
 
@@ -114,7 +119,7 @@ class CSCTask(pl.LightningModule):
 
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
-    def forward(self, input_ids, pinyin_ids, labels=None, pinyin_labels=None):
+    def forward(self, input_ids, pinyin_ids, labels=None, pinyin_labels=None, tgt_pinyin_ids=None, var=1):
         """"""
         attention_mask = (input_ids != 0).long()
         return self.model(
@@ -122,17 +127,21 @@ class CSCTask(pl.LightningModule):
             pinyin_ids,
             attention_mask=attention_mask,
             labels=labels,
+            tgt_pinyin_ids=tgt_pinyin_ids, 
+            var= self.args.var if 'var' in self.args else 1,
             pinyin_labels=pinyin_labels,
             gamma=self.args.gamma if "gamma" in self.args else 0,
         )
 
     def compute_loss(self, batch):
-        input_ids, pinyin_ids, labels, pinyin_labels = batch
+        input_ids, pinyin_ids, labels, tgt_pinyin_ids, pinyin_labels = batch
         loss_mask = (input_ids != 0) * (input_ids != 101) * (input_ids != 102).long()
         batch_size, length = input_ids.shape
         pinyin_ids = pinyin_ids.view(batch_size, length, 8)
+        tgt_pinyin_ids = tgt_pinyin_ids.view(batch_size, length, 8)
         outputs = self.forward(
-            input_ids, pinyin_ids, labels=labels, pinyin_labels=pinyin_labels
+            input_ids, pinyin_ids, labels=labels, pinyin_labels=pinyin_labels, tgt_pinyin_ids=tgt_pinyin_ids, 
+            var= self.args.var if 'var' in self.args else 1
         )
         loss = outputs.loss
         return loss
@@ -189,9 +198,9 @@ class CSCTask(pl.LightningModule):
         return {"df": results["sent-detect-f1"], "cf": results["sent-correct-f1"]}
 
     def train_dataloader(self) -> DataLoader:
-        name = "train_all"
+        name = "train_all_no_dev_with_tgt_pinyinid"
 
-        dataset = CSCDataset(
+        dataset = Dynaimic_CSCDataset(
             data_path=os.path.join(self.args.data_dir, name),
             chinese_bert_path=self.args.bert_path,
             max_length=self.args.max_length,
@@ -204,7 +213,7 @@ class CSCTask(pl.LightningModule):
             batch_size=self.args.batch_size,
             shuffle=True,
             num_workers=self.args.workers,
-            collate_fn=partial(collate_to_max_length_for_train, fill_values=[0, 0, 0, 0]),
+            collate_fn=partial(collate_to_max_length_for_train_dynamic_pron_loss, fill_values=[0, 0, 0, 0, 0]),
             drop_last=False,
         )
         return dataloader
@@ -230,7 +239,24 @@ class CSCTask(pl.LightningModule):
         return dataloader
 
     def val_dataloader(self):
-        return self.get_dataloader("dev15")
+        dataset = TestCSCDataset(
+            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan15.pkl',
+            chinese_bert_path=self.args.bert_path,
+            max_length=self.args.max_length,
+        )
+        print('dev dataset', len(dataset))
+        self.tokenizer = dataset.tokenizer
+        from datasets.collate_functions import collate_to_max_length_with_id
+
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=self.args.workers,
+            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
+            drop_last=False,
+        )
+        return dataloader
 
     def dev13_dataloader(self):
         return self.get_dataloader("dev13")
@@ -352,12 +378,13 @@ class CSCTask(pl.LightningModule):
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
+    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="Dynamic_PRON_LOSS", type=str,)
+    parser.add_argument("--var", type=int, default=1, help="var of dynamic loss factor")
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
     parser.add_argument(
         "--label_file",
-        default="/home/ljh/CSC/Enhanced_Syllable_Feature/data/finetune_data/dev15.lbl",
+        default="/home/ljh/CSC/Enhanced_Syllable_Feature/data/test.sighan15.lbl.tsv",
         type=str,
         help="label file",
     )

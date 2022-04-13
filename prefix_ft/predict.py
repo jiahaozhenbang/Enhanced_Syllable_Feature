@@ -1,7 +1,7 @@
 import argparse
 import os
 from pytorch_lightning import Trainer
-from finetune.train import CSCTask,MODEL_MAP
+from prefix_ft.train import PrefixCSC
 import re
 
 
@@ -19,7 +19,6 @@ def remove_de(input_path, output_path):
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--ckpt_path", required=True, type=str, help="ckpt file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
@@ -51,7 +50,7 @@ def main():
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
-    model = CSCTask(args)
+    model = PrefixCSC.load_from_checkpoint(args.ckpt_path, batch_size = 1)
 
     trainer = Trainer.from_argparse_args(args)
     if '14' in args.label_file:

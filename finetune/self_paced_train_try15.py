@@ -24,14 +24,12 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.nn import functional as F
 from torch.nn.modules import CrossEntropyLoss
 from torch.utils.data.dataloader import DataLoader
-from transformers import MODEL_MAPPING, AdamW, BertConfig, get_linear_schedule_with_warmup
+from transformers import AdamW, BertConfig, get_linear_schedule_with_warmup
 
 from datasets.bert_csc_dataset import CSCDataset,TestCSCDataset
-from models.modeling_multitask import GlyceBertForMultiTask,Attention_GlyceBertForMultiTask,Attention_and_weightLoss_GlyceBertForMultiTask
+from models.modeling_multitask import GlyceBertForMultiTask,Decoupled_GlyceBertForMultiTask
 from utils.random_seed import set_random_seed
 from datasets.collate_functions import collate_to_max_length_with_id,collate_to_max_length_for_train
-
-MODEL_MAP = {'ORINGIN': GlyceBertForMultiTask, 'ATTENTION': Attention_GlyceBertForMultiTask, 'ATTENTION_AND_WEIGHTED': Attention_and_weightLoss_GlyceBertForMultiTask}
 
 set_random_seed(2333)
 
@@ -57,15 +55,14 @@ class CSCTask(pl.LightningModule):
         self.bert_config = BertConfig.from_pretrained(
             self.bert_dir, output_hidden_states=False
         )
-        self.model = MODEL_MAP[self.args.model_architecture].from_pretrained(self.bert_dir)
+        self.model = Decoupled_GlyceBertForMultiTask.from_pretrained(self.bert_dir)
         if args.ckpt_path is not None:
             print("loading from ", args.ckpt_path)
-            ckpt = torch.load(args.ckpt_path,)["state_dict"]
+            ckpt = torch.load(args.ckpt_path, map_location='cuda' if torch.cuda.is_available() else torch.device('cpu'))["state_dict"]
             new_ckpt = {}
             for key in ckpt.keys():
                 new_ckpt[key[6:]] = ckpt[key]
             self.model.load_state_dict(new_ckpt,strict=False)
-            print(self.model.device, torch.cuda.is_available())
         self.vocab_size = self.bert_config.vocab_size
 
         self.loss_fct = CrossEntropyLoss()
@@ -73,6 +70,7 @@ class CSCTask(pl.LightningModule):
             str(self.args.gpus) if not str(self.args.gpus).endswith(",") else str(self.args.gpus)[:-1]
         )
         self.num_gpus = len(gpus_string.split(","))
+        self.log('batch_size', self.args.batch_size)
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""
@@ -189,16 +187,17 @@ class CSCTask(pl.LightningModule):
         return {"df": results["sent-detect-f1"], "cf": results["sent-correct-f1"]}
 
     def train_dataloader(self) -> DataLoader:
-        name = "train_all"
-
+        name = "train15"
+        
         dataset = CSCDataset(
             data_path=os.path.join(self.args.data_dir, name),
             chinese_bert_path=self.args.bert_path,
             max_length=self.args.max_length,
         )
+        print('train dataset', len(dataset))
         if not hasattr(self, 'tokenizer'):
             self.tokenizer = dataset.tokenizer
-
+        print('train dataset is here', len(dataset),self.args.batch_size)
         dataloader = DataLoader(
             dataset=dataset,
             batch_size=self.args.batch_size,
@@ -230,7 +229,24 @@ class CSCTask(pl.LightningModule):
         return dataloader
 
     def val_dataloader(self):
-        return self.get_dataloader("dev15")
+        dataset = TestCSCDataset(
+            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan15.pkl',
+            chinese_bert_path=self.args.bert_path,
+            max_length=self.args.max_length,
+        )
+        print('dev dataset', len(dataset))
+        self.tokenizer = dataset.tokenizer
+        from datasets.collate_functions import collate_to_max_length_with_id
+
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=self.args.workers,
+            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
+            drop_last=False,
+        )
+        return dataloader
 
     def dev13_dataloader(self):
         return self.get_dataloader("dev13")
@@ -238,126 +254,14 @@ class CSCTask(pl.LightningModule):
     def dev14_dataloader(self):
         return self.get_dataloader("dev14")
 
-    def test13_dataloader(self):
-        dataset = TestCSCDataset(
-            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan13.pkl',
-            chinese_bert_path=self.args.bert_path,
-            max_length=self.args.max_length,
-        )
-        self.tokenizer = dataset.tokenizer
-        from datasets.collate_functions import collate_to_max_length_with_id
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=self.args.batch_size,
-            shuffle=False,
-            num_workers=self.args.workers,
-            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
-            drop_last=False,
-        )
-        return dataloader
-    
-    def test14_dataloader(self):
-        dataset = TestCSCDataset(
-            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan14.pkl',
-            chinese_bert_path=self.args.bert_path,
-            max_length=self.args.max_length,
-        )
-        self.tokenizer = dataset.tokenizer
-        from datasets.collate_functions import collate_to_max_length_with_id
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=self.args.batch_size,
-            shuffle=False,
-            num_workers=self.args.workers,
-            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
-            drop_last=False,
-        )
-        return dataloader
-
-    def test15_dataloader(self):
-        dataset = TestCSCDataset(
-            data_path='/home/ljh/github/ReaLiSe-master/data/test.sighan15.pkl',
-            chinese_bert_path=self.args.bert_path,
-            max_length=self.args.max_length,
-        )
-        self.tokenizer = dataset.tokenizer
-        from datasets.collate_functions import collate_to_max_length_with_id
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=self.args.batch_size,
-            shuffle=False,
-            num_workers=self.args.workers,
-            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
-            drop_last=False,
-        )
-        return dataloader
-
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        input_ids, pinyin_ids, labels, pinyin_labels, ids, srcs, tokens_size = batch
-        mask = (input_ids != 0) * (input_ids != 101) * (input_ids != 102).long()
-        batch_size, length = input_ids.shape
-        pinyin_ids = pinyin_ids.view(batch_size, length, 8)
-        logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids).logits
-        predict_scores = F.softmax(logits, dim=-1)
-        predict_labels = torch.argmax(predict_scores, dim=-1) * mask
-        
-
-        if '13' in self.args.label_file:
-            predict_labels[(predict_labels == self.tokenizer.token_to_id('地')) | (predict_labels == self.tokenizer.token_to_id('得'))] = \
-                input_ids[(predict_labels == self.tokenizer.token_to_id('地')) | (predict_labels == self.tokenizer.token_to_id('得'))]
-        
-        pre_predict_labels = predict_labels
-        for _ in range(0):
-            record_index = []
-            for i,(a,b) in enumerate(zip(list(input_ids[0,1:-1]),list(predict_labels[0,1:-1]))):
-                if a!=b:
-                    record_index.append(i)
-            
-            input_ids[0,1:-1] = predict_labels[0,1:-1]
-            sent, new_pinyin_ids = decode_sentence_and_get_pinyinids(input_ids[0,1:-1].cpu().numpy().tolist())
-            if new_pinyin_ids.shape[1] == input_ids.shape[1]:
-                pinyin_ids = new_pinyin_ids
-            pinyin_ids = pinyin_ids.to(input_ids.device)
-            # print(input_ids.device, pinyin_ids.device)
-            logits = self.forward(input_ids=input_ids, pinyin_ids=pinyin_ids).logits
-            predict_scores = F.softmax(logits, dim=-1)
-            predict_labels = torch.argmax(predict_scores, dim=-1) * mask
-
-            for i,(a,b) in enumerate(zip(list(input_ids[0,1:-1]),list(predict_labels[0,1:-1]))):
-                if a!=b and any([abs(i-x)<=1 for x in record_index]):
-                    print(ids,srcs)
-                    print(i+1,)
-                else:
-                    predict_labels[0,i+1] = input_ids[0,i+1]
-            if predict_labels[0,i+1] == input_ids[0,i+1]:
-                break
-            if '13' in self.args.label_file:
-                predict_labels[(predict_labels == self.tokenizer.token_to_id('地')) | (predict_labels == self.tokenizer.token_to_id('得'))] = \
-                    input_ids[(predict_labels == self.tokenizer.token_to_id('地')) | (predict_labels == self.tokenizer.token_to_id('得'))]
-        # if not pre_predict_labels.equal(predict_labels):
-        #     print([self.tokenizer.id_to_token(id) for id in pre_predict_labels[0][1:-1]])
-        #     print([self.tokenizer.id_to_token(id) for id in predict_labels[0][1:-1]])
-        return {
-            "tgt_idx": labels.cpu(),
-            "post_pred_idx": predict_labels.cpu(),
-            "pred_idx": pre_predict_labels.cpu(),
-            "id": ids,
-            "src": srcs,
-            "tokens_size": tokens_size,
-        }
-
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
     parser.add_argument(
         "--label_file",
-        default="/home/ljh/CSC/Enhanced_Syllable_Feature/data/finetune_data/dev15.lbl",
+        default="/home/ljh/github/ReaLiSe-master/data/test.sighan15.lbl.tsv",
         type=str,
         help="label file",
     )
@@ -430,7 +334,7 @@ def main():
         args, callbacks=[checkpoint_callback], logger=logger
     )
 
-    trainer.fit(model)
+    trainer.fit(model,)
 
 
 if __name__ == "__main__":

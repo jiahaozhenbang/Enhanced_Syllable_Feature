@@ -2,7 +2,7 @@ import argparse
 import os
 from unittest import result
 from pytorch_lightning import Trainer
-from finetune.train import CSCTask,MODEL_MAP
+from prefix_ft.train import PrefixCSC
 import re
 
 
@@ -20,7 +20,6 @@ def remove_de(input_path, output_path):
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
-    parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--ckpt_path", required=True, type=str, help="ckpt file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
@@ -60,7 +59,7 @@ def main():
     for index, cp in enumerate(cp_list):
         args.ckpt_path = cp
         print('model assignment')
-        model = CSCTask(args)
+        model = PrefixCSC.load_from_checkpoint(args.ckpt_path, batch_size = args.batch_size, label_file = args.label_file)
         print('model load completed')
         trainer = Trainer.from_argparse_args(args)
         print('trainer initialization completed')
@@ -69,7 +68,7 @@ def main():
         elif '13'in args.label_file:
             output=trainer.validate(model=model,dataloaders=model.dev13_dataloader(),ckpt_path=args.ckpt_path)
         else:
-            output=trainer.validate(model=model,dataloaders=model.val_dataloader(),ckpt_path=args.ckpt_path)
+            output=trainer.validate(model=model,dataloaders=model.dev15_dataloader(),ckpt_path=args.ckpt_path)
         # print(output[:3])
         # from metrics.metric import Metric
         # metric = Metric(vocab_path=args.bert_path)
