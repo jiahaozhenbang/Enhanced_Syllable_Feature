@@ -889,3 +889,110 @@ class Dynamic_GlyceBertForMultiTask(BertPreTrainedModel):
             hidden_states=outputs_x.hidden_states,
             attentions=outputs_x.attentions,
         )
+
+
+class Levenshtein_GlyceBertForMultiTask(BertPreTrainedModel):
+    def __init__(self, config):
+        super(Levenshtein_GlyceBertForMultiTask, self).__init__(config)
+
+        self.bert = GlyceBertModel(config)
+        self.cls = MultiTaskHeads(config)
+        self.loss_fct = CrossEntropyLoss(reduction= 'none')
+
+        self.init_weights()
+
+    def get_output_embeddings(self):
+        return self.cls.predictions.decoder
+
+    def forward(
+        self,
+        input_ids=None,
+        pinyin_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        pron_similarity=None,
+        pinyin_labels=None, 
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        gamma=1,
+        **kwargs
+    ):
+
+        assert "lm_labels" not in kwargs, "Use `BertWithLMHead` for autoregressive language modeling task."
+        assert kwargs == {}, f"Unexpected keyword arguments: {list(kwargs.keys())}."
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        loss_mask = (input_ids != 0)*(input_ids != 101)*(input_ids != 102).long()
+        outputs_x = self.bert(
+            input_ids,
+            pinyin_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        encoded_x = outputs_x[0]
+
+        prediction_scores, sm_scores,ym_scores,sd_scores = self.cls(encoded_x)
+
+        
+        masked_lm_loss = None
+        phonetic_loss=None
+        loss_fct = self.loss_fct  # -100 index = padding token
+        if labels is not None and pinyin_labels is not None:
+
+            active_loss = loss_mask.view(-1) == 1
+
+            active_labels = torch.where(
+                active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
+            )
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), active_labels)
+
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,0].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            sm_loss = loss_fct(sm_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sm_size), active_labels)
+
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,1].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            ym_loss = loss_fct(ym_scores.view(-1, self.cls.Phonetic_relationship.pinyin.ym_size), active_labels)
+
+            active_labels = torch.where(
+                active_loss, pinyin_labels[...,2].view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            sd_loss = loss_fct(sd_scores.view(-1, self.cls.Phonetic_relationship.pinyin.sd_size), active_labels)
+            phonetic_loss=(sm_loss+ym_loss+sd_loss)/3
+
+            def weighted_mean(weight, input):
+                return torch.sum(weight * input) / torch.sum(weight)
+
+            masked_lm_loss = weighted_mean(torch.ones_like(masked_lm_loss), masked_lm_loss)
+            phonetic_loss = weighted_mean(pron_similarity.view(-1), phonetic_loss)
+
+
+        loss=None
+        if masked_lm_loss is not None and phonetic_loss is not None:
+            loss=masked_lm_loss 
+            loss+= phonetic_loss *gamma
+
+        return MaskedLMOutput(
+            loss=loss,
+            logits=prediction_scores,
+            hidden_states=outputs_x.hidden_states,
+            attentions=outputs_x.attentions,
+        )

@@ -13,7 +13,7 @@ import json
 import random
 sys.path.insert(0,  '/home/ljh/CSC/Enhanced_Syllable_Feature')
 from datasets.utils import pho_convertor
-
+from Levenshtein import ratio
 
 class hanzi2pinyin():
 
@@ -92,6 +92,21 @@ class hanzi2pinyin():
                 pinyin_labels.append((0, 0, 0))
 
         return pinyin_labels
+    
+    def get_similarity_between_pinyinids_basedonLevenshtein(self, pinyinids_a, pinyinids_b):
+        def get_pinyin_str(pinyinids):
+            pinyin_str = ''
+            for id in pinyinids:
+                char = self.pinyin_dict['idx2char'][id]
+                pinyin_str += char
+                if char == '0':
+                    break
+            return pinyin_str
+
+        pinyin_a = get_pinyin_str(pinyinids_a)
+        pinyin_b = get_pinyin_str(pinyinids_b)
+        
+        return ratio(pinyin_a, pinyin_b)
 
 
 token2pinyin = hanzi2pinyin('/home/ljh/model/ChineseBERT-base')
@@ -178,6 +193,34 @@ def all_train_data_to_pickle_with_tgt_pinyinid(data_path, output_dir, vocab_path
         print("Wrote %d total instances to %s", len(data), out_file)
 
     write_data_to_txt(train_all, os.path.join(output_dir, 'train_all_no_dev_with_tgt_pinyinid'))
+
+def all_train_data_to_pickle_with_Levenshtein_similarity(data_path, output_dir, vocab_path, max_len ):
+    def _build_dataset(data_path):
+        print('processing ', data_path)
+        return build_dataset_with_simbaesdonLevenshtein(
+        data_path=data_path,
+        vocab_path=vocab_path,
+        max_len=max_len
+    )
+    sighan13_trainset = _build_dataset(data_path=os.path.join(data_path, 'train.sighan13-1.tsv')) + _build_dataset(
+        data_path=os.path.join(data_path, 'train.sighan13-2.tsv'))
+    sighan14_dataset = _build_dataset(data_path=os.path.join(data_path, 'train.sighan14-1.tsv')) + _build_dataset(
+        data_path=os.path.join(data_path, 'train.sighan14-2.tsv'))
+    sighan15_dataset = _build_dataset(data_path=os.path.join(data_path, 'train.sighan15-1.tsv')) + _build_dataset(
+        data_path=os.path.join(data_path, 'train.sighan15-2.tsv'))
+    wang27k_trainset = _build_dataset(data_path=os.path.join(data_path, 'train.wang27k.tsv'))
+
+
+    train_all = sighan13_trainset + sighan14_dataset + sighan15_dataset + wang27k_trainset
+    random.shuffle(train_all)
+
+    def write_data_to_txt(data, out_file):
+        with open(out_file, 'w', encoding='utf8',) as f:
+            for example in data:
+                f.write(json.dumps(example, ensure_ascii=False)+'\n')
+        print("Wrote %d total instances to %s", len(data), out_file)
+
+    write_data_to_txt(train_all, os.path.join(output_dir, 'train_all_no_dev_with_Levenshtein_similarity'))
 
 def data_to_pickle(data_path, output_dir, vocab_path, max_len ):
     def _build_dataset(data_path):
@@ -336,6 +379,68 @@ def build_dataset_with_tgt_pinyinid(data_path, vocab_path, max_len):
 
     return data
 
+def build_dataset_with_simbaesdonLevenshtein(data_path, vocab_path, max_len):
+    # Load Data
+    data_raw = []
+    with open(data_path, encoding='utf8') as f:
+        data_raw = [s.split('\t') for s in f.read().splitlines()]
+    print(f'#Item: {len(data_raw)} from "{data_path}"')
+
+    # Vocab
+    tokenizer = BertWordPieceTokenizer(vocab_path, lowercase = True)
+
+
+    # Data Basic
+    data = []
+    for item_raw in tqdm(data_raw, desc='Build Dataset'):
+        # Field: id, src, tgt
+        item = {
+            'id': item_raw[0],
+            'src': item_raw[1],
+            'tgt': item_raw[2],
+        }
+        assert len(item['src']) == len(item['tgt'])
+        data.append(item)
+
+        # Field: tokens_size
+        encoded = tokenizer.encode(item['src'])
+        tokens = encoded.tokens[1:-1]
+        tokens_size = []
+        for t in tokens:
+            if t == '[UNK]':
+                tokens_size.append(1)
+            elif t.startswith('##'):
+                tokens_size.append(len(t) - 2)
+            else:
+                tokens_size.append(len(t))
+        item['tokens_size'] = tokens_size
+
+        # Field: src_idx
+        item['input_ids'] = encoded.ids
+        item['pinyin_ids'] = token2pinyin.convert_sentence_to_pinyin_ids(item['src'], encoded)
+
+        # Field: tgt_idx
+        encoded = tokenizer.encode(item['tgt'])
+        item['label'] = encoded.ids
+        tgt_pinyin_ids = token2pinyin.convert_sentence_to_pinyin_ids(item['tgt'], encoded)
+        item['pron_similarity'] = [ token2pinyin.get_similarity_between_pinyinids_basedonLevenshtein(a, b) \
+                                            for (a, b) in zip(item['pinyin_ids'], tgt_pinyin_ids)]
+        item['pinyin_label'] = token2pinyin.convert_sentence_to_shengmu_yunmu_shengdiao_ids(item['tgt'], encoded)
+        assert len(item['input_ids']) == len(item['label'])
+    # print(data[:5])
+    # exit()
+
+
+    # Trim
+    if max_len > 0:
+        n_all_items = len(data)
+        data = [item for item in data if len(item['input_ids']) <= max_len]
+        n_filter_items = len(data)
+        n_cut = n_all_items - n_filter_items
+        print(f'max_len={max_len}, {n_all_items} -> {n_filter_items} ({n_cut})')
+
+    return data
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', required=True)
@@ -363,7 +468,13 @@ if __name__ == '__main__':
     #     vocab_path=args.vocab_path,
     #     max_len=args.max_len,
     # )
-    all_train_data_to_pickle_with_tgt_pinyinid(
+    # all_train_data_to_pickle_with_tgt_pinyinid(
+    #     data_path=args.data_path,
+    #     output_dir=args.output_dir,
+    #     vocab_path=args.vocab_path,
+    #     max_len=args.max_len,
+    # )
+    all_train_data_to_pickle_with_Levenshtein_similarity(
         data_path=args.data_path,
         output_dir=args.output_dir,
         vocab_path=args.vocab_path,
