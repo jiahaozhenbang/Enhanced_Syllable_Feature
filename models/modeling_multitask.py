@@ -1073,14 +1073,13 @@ class Dynamic_GlyceBertForMultiTask_with_KD(BertPreTrainedModel):
                 )
                 encoded_y = outputs_y[0]
                 assert encoded_x.shape == encoded_y.shape
-                KD_lossfunction = torch.nn.MSELoss()
-                KD_loss = KD_lossfunction(encoded_x, encoded_y.detach())
                 pron_x = self.cls.Phonetic_relationship.transform(encoded_x)
                 pron_y = self.cls.Phonetic_relationship.transform(encoded_y) #[bs, seq, hidden_states]
                 assert pron_x.shape == pron_y.shape
                 sim_xy = F.cosine_similarity(pron_x, pron_y, dim= -1) #[ns, seq]
                 factor = torch.exp( -((sim_xy -1.0) / var).pow(2)).detach()
-
+            KD_lossfunction = torch.nn.MSELoss()
+            KD_loss = KD_lossfunction(encoded_x, encoded_y.detach())
 
         prediction_scores, sm_scores,ym_scores,sd_scores = self.cls(encoded_x)
 
