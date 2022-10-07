@@ -58,6 +58,8 @@ def main():
         output=trainer.predict(model=model,dataloaders=model.test14_dataloader(),ckpt_path=args.ckpt_path)
     elif '13'in args.label_file:
         output=trainer.predict(model=model,dataloaders=model.test13_dataloader(),ckpt_path=args.ckpt_path)
+    elif 'ocr' in args.label_file:
+        output=trainer.predict(model=model,dataloaders=model.ocr_test_dataloader(),ckpt_path=args.ckpt_path)
     else:
         output=trainer.predict(model=model,dataloaders=model.test15_dataloader(),ckpt_path=args.ckpt_path)
     # print(output[:3])

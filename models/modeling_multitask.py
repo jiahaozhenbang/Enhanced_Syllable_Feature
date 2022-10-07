@@ -889,6 +889,140 @@ class Dynamic_GlyceBertForMultiTask(BertPreTrainedModel):
             hidden_states=outputs_x.hidden_states,
             attentions=outputs_x.attentions,
         )
+class GlyceBertForAblation_with_dynamic_loss(BertPreTrainedModel):
+    def __init__(self, config):
+        super(GlyceBertForAblation_with_dynamic_loss, self).__init__(config)
+
+        self.bert = GlyceBertModel(config)
+        self.cls = AblationHeads(config)
+        self.loss_fct = CrossEntropyLoss(reduction= 'none')
+
+        self.init_weights()
+
+    def get_output_embeddings(self):
+        return self.cls.predictions.decoder
+
+    def forward(
+        self,
+        input_ids=None,
+        pinyin_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        labels=None,
+        pinyin_labels=None, 
+        tgt_pinyin_ids=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        gamma=1,
+        var=1,
+        **kwargs
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            Labels for computing the masked language modeling loss.
+            Indices should be in ``[-100, 0, ..., config.vocab_size]`` (see ``input_ids`` docstring)
+            Tokens with indices set to ``-100`` are ignored (masked), the loss is only computed for the tokens with labels
+            in ``[0, ..., config.vocab_size]``
+        kwargs (:obj:`Dict[str, any]`, optional, defaults to `{}`):
+            Used to hide legacy arguments that have been deprecated.
+        """
+        if "masked_lm_labels" in kwargs:
+            warnings.warn(
+                "The `masked_lm_labels` argument is deprecated and will be removed in a future version, use `labels` instead.",
+                FutureWarning,
+            )
+            labels = kwargs.pop("masked_lm_labels")
+        assert "lm_labels" not in kwargs, "Use `BertWithLMHead` for autoregressive language modeling task."
+        assert kwargs == {}, f"Unexpected keyword arguments: {list(kwargs.keys())}."
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        loss_mask = (input_ids != 0)*(input_ids != 101)*(input_ids != 102).long()
+        outputs_x = self.bert(
+            input_ids,
+            pinyin_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        encoded_x = outputs_x[0]
+        if tgt_pinyin_ids is not None:
+            with torch.no_grad():
+                outputs_y = self.bert(
+                    labels,
+                    tgt_pinyin_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    position_ids=position_ids,
+                    head_mask=head_mask,
+                    inputs_embeds=inputs_embeds,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+                encoded_y = outputs_y[0]
+                pron_x = self.cls.Phonetic_relationship.transform(encoded_x)
+                pron_y = self.cls.Phonetic_relationship.transform(encoded_y) #[bs, seq, hidden_states]
+                assert pron_x.shape == pron_y.shape
+                sim_xy = F.cosine_similarity(pron_x, pron_y, dim= -1) #[ns, seq]
+                factor = torch.exp( -((sim_xy -1.0) / var).pow(2)).detach()
+
+        prediction_scores, pinyin_scores = self.cls(encoded_x)
+
+        
+        masked_lm_loss = None
+        phonetic_loss=None
+        loss_fct = self.loss_fct  # -100 index = padding token
+        if labels is not None and pinyin_labels is not None:
+
+            active_loss = loss_mask.view(-1) == 1
+
+            active_labels = torch.where(
+                active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
+            )
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), active_labels)
+
+            active_loss = loss_mask.view(-1) == 1
+            active_labels = torch.where(
+                active_loss, pinyin_labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(pinyin_labels)
+            )
+            phonetic_loss = loss_fct(pinyin_scores.view(-1, 1378), active_labels)
+
+            def weighted_mean(weight, input):
+                return torch.sum(weight * input) / torch.sum(weight)
+
+            masked_lm_loss = weighted_mean(torch.ones_like(masked_lm_loss), masked_lm_loss)
+            phonetic_loss = weighted_mean(factor.view(-1), phonetic_loss)
+
+
+        loss=None
+        if masked_lm_loss is not None and phonetic_loss is not None:
+            loss=masked_lm_loss 
+            loss+= phonetic_loss *gamma
+
+        return MaskedLMOutput(
+            loss=loss,
+            logits=prediction_scores,
+            hidden_states=outputs_x.hidden_states,
+            attentions=outputs_x.attentions,
+        )
+
+
 
 
 class Levenshtein_GlyceBertForMultiTask(BertPreTrainedModel):

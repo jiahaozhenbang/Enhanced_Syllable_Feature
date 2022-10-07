@@ -77,7 +77,7 @@ def load_test(input_path, label_path, year):
 
     if year == 13:
         for row in input_rows:
-            assert len(row) == 2
+            assert len(row) == 2, row
             sent = row[1]
             sent = sent.replace('…', '')
             sent = sent.replace('(', '').replace(')', '')
@@ -212,7 +212,7 @@ def load_test(input_path, label_path, year):
 
         # Make sure no English symbols
         for s in r'�．!@#$%^&*_+()=`~\|<>,/?:;\'"':
-            assert item['src'].find(s) == -1
+            assert item['src'].find(s) == -1, item
             assert item['tgt'].find(s) == -1
 
         # Make sure end with Chinese punctuation

@@ -33,7 +33,6 @@ from datasets.collate_functions import collate_to_max_length_with_id,collate_to_
 
 MODEL_MAP = {'ORINGIN': GlyceBertForMultiTask, 'ATTENTION': Attention_GlyceBertForMultiTask, 'ATTENTION_AND_WEIGHTED': Attention_and_weightLoss_GlyceBertForMultiTask}
 
-set_random_seed(2333)
 
 def decode_sentence_and_get_pinyinids(ids):
     dataset = TestCSCDataset(
@@ -294,6 +293,25 @@ class CSCTask(pl.LightningModule):
             drop_last=False,
         )
         return dataloader
+    
+    def ocr_test_dataloader(self):
+
+        dataset = CSCDataset(
+            data_path=os.path.join('/home/ljh/CSC/Enhanced_Syllable_Feature/data/ocr_no_dev/ocr_test_with_tgt_pinyinid'),
+            chinese_bert_path=self.args.bert_path,
+            max_length=self.args.max_length,
+        )
+        from datasets.collate_functions import collate_to_max_length_with_id
+
+        dataloader = DataLoader(
+            dataset=dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            num_workers=self.args.workers,
+            collate_fn=partial(collate_to_max_length_with_id, fill_values=[0, 0, 0, 0]),
+            drop_last=False,
+        )
+        return dataloader
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         input_ids, pinyin_ids, labels, pinyin_labels, ids, srcs, tokens_size = batch
@@ -353,6 +371,7 @@ class CSCTask(pl.LightningModule):
 def get_parser():
     parser = argparse.ArgumentParser(description="Training")
     parser.add_argument("--model_architecture", choices=list(MODEL_MAP.keys()), default="ORINGIN", type=str,)
+    parser.add_argument("--global_seed", type=int, default=2333)
     parser.add_argument("--bert_path", required=True, type=str, help="bert config file")
     parser.add_argument("--data_dir", required=True, type=str, help="train data path")
     parser.add_argument(
@@ -402,6 +421,7 @@ def main():
     parser = get_parser()
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
+    set_random_seed(args.global_seed)
 
     # create save path if doesn't exit
     if not os.path.exists(args.save_path):

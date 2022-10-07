@@ -34,6 +34,16 @@ class Pinyin(object):
         return self.shengmu.index(sm)+1 if sm in self.shengmu else 0, \
             self.yunmu.index(ym)+1 if ym in self.yunmu else 0, \
                 self.shengdiao.index(sd)+1 if sd in self.shengdiao else 0
+    
+    def get_pinyinstr(self, sm_ym_sd_label):
+        sm, ym, sd = sm_ym_sd_label
+        sm -= 1
+        ym -= 1
+        sd -= 1
+        sm = self.shengmu[sm] if sm >=0 else ''
+        ym = self.yunmu[ym] if ym >= 0 else ''
+        sd = self.shengdiao[sd] if sd >= 0 else ''
+        return sm + ym + sd
 
 pho_convertor = Pinyin()
 

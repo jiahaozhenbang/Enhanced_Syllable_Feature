@@ -67,13 +67,18 @@ def pp_predict(model,
         kl_scale=0.01,
 ):
     input_ids, pinyin_ids, labels, pinyin_labels, ids, srcs, tokens_size = batch
+    input_ids = to_var(input_ids)
+    pinyin_ids = to_var(pinyin_ids)
+    labels =  to_var(labels)
+    pinyin_labels = to_var(pinyin_labels)
     loss_mask = (input_ids != 0)*(input_ids != 101)*(input_ids != 102).long()
     mask = (input_ids != 0) * (input_ids != 101) * (input_ids != 102).long()
     batch_size, length = input_ids.shape
     pinyin_ids = pinyin_ids.view(batch_size, length, 8)
-    sequence_feature = model.bert.forward(input_ids=input_ids, pinyin_ids=pinyin_ids).last_hidden_state
+    sequence_feature = model.bert.forward(input_ids=to_var(input_ids), pinyin_ids=to_var(pinyin_ids)).last_hidden_state
 
     accumulate_grad = to_var(torch.zeros(sequence_feature.shape), requires_grad= True, )
+    # print(accumulate_grad.device, sequence_feature.device, model.device)
     perturb_feature = torch.add(sequence_feature, accumulate_grad)
 
     prediction_scores, sm_scores,ym_scores,sd_scores = model.cls(perturb_feature)
@@ -183,6 +188,7 @@ def main():
         param.requires_grad = False
 
     outputs = []
+    # print(model.device, device)
     for batch in tqdm(test15_dataloader(args)):
         output = pp_predict(model, batch, device=device, stepsize= args.stepsize)
         outputs.append(output)
